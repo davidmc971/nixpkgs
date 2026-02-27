@@ -21,8 +21,11 @@
   vulkan-tools,
   vulkan-headers,
   vulkan-loader,
+  opencl-headers,
+  ocl-icd,
   shaderc,
   ccache,
+  python3,
 
   versionCheckHook,
   writableTmpDirAsHomeHook,
@@ -33,9 +36,10 @@
   ollama-rocm,
   ollama-cuda,
   ollama-vulkan,
+  ollama-opencl,
 
   config,
-  # one of `[ null false "rocm" "cuda" "vulkan" ]`
+  # one of `[ null false "rocm" "cuda" "vulkan" "opencl" ]`
   acceleration ? null,
 }:
 
@@ -45,6 +49,7 @@ assert builtins.elem acceleration [
   "rocm"
   "cuda"
   "vulkan"
+  "opencl"
 ];
 
 let
@@ -58,10 +63,12 @@ let
   rocmRequested = shouldEnable "rocm" config.rocmSupport;
   cudaRequested = shouldEnable "cuda" config.cudaSupport;
   vulkanRequested = acceleration == "vulkan";
+  openclRequested = acceleration == "opencl";
 
   enableRocm = rocmRequested && stdenv.hostPlatform.isLinux;
   enableCuda = cudaRequested && stdenv.hostPlatform.isLinux;
   enableVulkan = vulkanRequested && stdenv.hostPlatform.isLinux;
+  enableOpenCL = openclRequested && stdenv.hostPlatform.isLinux;
 
   rocmLibs = [
     rocmPackages.clr
@@ -87,6 +94,11 @@ let
   vulkanLibs = [
     vulkan-headers
     vulkan-loader
+  ];
+
+  openclLibs = [
+    opencl-headers
+    ocl-icd
   ];
 
   # Extract the major version of CUDA. e.g. 11 12
@@ -120,7 +132,11 @@ let
   ]
   ++ lib.optionals enableVulkan [
     "--suffix LD_LIBRARY_PATH : '${lib.makeLibraryPath (map lib.getLib vulkanLibs)}'"
-    "--set-default OLLAMA_VULKAN : '1'"
+    "--set-default OLLAMA_VULKAN '1'"
+  ]
+  ++ lib.optionals enableOpenCL [
+    "--suffix LD_LIBRARY_PATH : '${lib.makeLibraryPath (map lib.getLib openclLibs)}'"
+    "--set-default OLLAMA_OPENCL '1'"
   ];
   wrapperArgs = builtins.concatStringsSep " " wrapperOptions;
 
@@ -140,10 +156,13 @@ goBuild (finalAttrs: {
   version = "0.17.4";
 
   src = fetchFromGitHub {
-    owner = "ollama";
+    # owner = "ollama";
+    owner = "davidmc971";
     repo = "ollama";
-    tag = "v${finalAttrs.version}";
-    hash = "sha256-9yJ8Jbgrgiz/Pr6Se398DLkk1U2Lf5DDUi+tpEIjAaI=";
+    # tag = "v${finalAttrs.version}";
+    # hash = "sha256-9yJ8Jbgrgiz/Pr6Se398DLkk1U2Lf5DDUi+tpEIjAaI=";
+    rev = "5e0064042911f4d354e52cc85df20e4fe3a7a17b";
+    hash = "sha256-/foA59U2CxD99OUQnIdAIqpZe0uIxmnAdK0IGMhW0ho=";
   };
 
   vendorHash = "sha256-Lc1Ktdqtv2VhJQssk8K1UOimeEjVNvDWePE9WkamCos=";
@@ -169,19 +188,20 @@ goBuild (finalAttrs: {
     rocmLibs
   ]
   ++ lib.optionals enableCuda [ cudaPackages.cuda_nvcc ]
-  ++ lib.optionals (enableRocm || enableCuda) [
+  ++ lib.optionals (enableRocm || enableCuda || enableOpenCL) [
     makeBinaryWrapper
     autoAddDriverRunpath
   ]
-  ++ lib.optionals enableVulkan [
-    ccache
+  ++ lib.optionals enableOpenCL [
+    python3
   ];
 
   buildInputs =
     lib.optionals enableRocm (rocmLibs ++ [ libdrm ])
     ++ lib.optionals enableCuda cudaLibs
     ++ lib.optionals stdenv.hostPlatform.isDarwin [ apple-sdk_15 ]
-    ++ lib.optionals enableVulkan vulkanLibs;
+    ++ lib.optionals enableVulkan vulkanLibs
+    ++ lib.optionals enableOpenCL openclLibs;
 
   # replace inaccurate version number with actual release version
   postPatch = ''
@@ -218,27 +238,40 @@ goBuild (finalAttrs: {
       cmakeFlagsCudaArchitectures = lib.optionalString enableCuda "-DCMAKE_CUDA_ARCHITECTURES='${cudaArchitectures}'";
       cmakeFlagsRocmTargets = lib.optionalString enableRocm "-DAMDGPU_TARGETS='${rocmTargets}'";
 
+      # GGML_OPENCL=ON
+      # GGML_USE_OPENCL=ON
+      cmakeFlagsOpenCL = lib.optionalString enableOpenCL "-DGGML_OPENCL=ON -DGGML_USE_OPENCL=ON -DGGML_OPENCL_TARGET_VERSION=300 -DGGML_OPENCL_EMBED_KERNELS=ON -DGGML_OPENCL_USE_ADRENO_KERNELS=ON";
+
     in
     ''
       cmake -B build \
         -DCMAKE_SKIP_BUILD_RPATH=ON \
         -DCMAKE_BUILD_WITH_INSTALL_RPATH=ON \
+        -DGGML_CCACHE=OFF \
         ${cmakeFlagsCudaArchitectures} \
         ${cmakeFlagsRocmTargets} \
+        ${cmakeFlagsOpenCL} \
 
       cmake --build build -j $NIX_BUILD_CORES
     '';
 
   # ollama looks for acceleration libs in ../lib/ollama/ (now also for CPU-only with arch specific optimizations)
+  # GPU backends must be in subdirectories (e.g. lib/ollama/opencl/) for discover/runner.go glob
   # https://github.com/ollama/ollama/blob/v0.5.11/docs/development.md#library-detection
   postInstall = ''
     mkdir -p $out/lib
     cp -r build/lib/ollama $out/lib/
+  ''
+  + lib.optionalString enableOpenCL ''
+    mkdir -p $out/lib/ollama/opencl
+    mv $out/lib/ollama/libggml-opencl.so $out/lib/ollama/opencl/
+    ln -s $out/lib/ollama/libggml-base.so.0 $out/lib/ollama/opencl/libggml-base.so.0
+    ln -s $out/lib/ollama/libggml-base.so $out/lib/ollama/opencl/libggml-base.so
   '';
 
   postFixup =
     # expose runtime libraries necessary to use the gpu
-    lib.optionalString (enableRocm || enableCuda) ''
+    lib.optionalString (enableRocm || enableCuda || enableOpenCL) ''
       wrapProgram "$out/bin/ollama" ${wrapperArgs}
     '';
 
@@ -276,11 +309,17 @@ goBuild (finalAttrs: {
       inherit ollama;
     }
     // lib.optionalAttrs stdenv.hostPlatform.isLinux {
-      inherit ollama-rocm ollama-cuda ollama-vulkan;
+      inherit
+        ollama-rocm
+        ollama-cuda
+        ollama-vulkan
+        ollama-opencl
+        ;
       service = nixosTests.ollama;
       service-cuda = nixosTests.ollama-cuda;
       service-rocm = nixosTests.ollama-rocm;
       service-vulkan = nixosTests.ollama-vulkan;
+      service-opencl = nixosTests.ollama-opencl;
     };
   }
   // lib.optionalAttrs (!enableRocm && !enableCuda) { updateScript = nix-update-script { }; };
@@ -290,12 +329,16 @@ goBuild (finalAttrs: {
       "Get up and running with large language models locally"
       + lib.optionalString rocmRequested ", using ROCm for AMD GPU acceleration"
       + lib.optionalString cudaRequested ", using CUDA for NVIDIA GPU acceleration"
-      + lib.optionalString vulkanRequested ", using Vulkan for generic GPU acceleration";
+      + lib.optionalString vulkanRequested ", using Vulkan for generic GPU acceleration"
+      + lib.optionalString openclRequested ", using OpenCL for generic GPU , Adreno support";
     homepage = "https://github.com/ollama/ollama";
     changelog = "https://github.com/ollama/ollama/releases/tag/v${finalAttrs.version}";
     license = licenses.mit;
     platforms =
-      if (rocmRequested || cudaRequested || vulkanRequested) then platforms.linux else platforms.unix;
+      if (rocmRequested || cudaRequested || vulkanRequested || openclRequested) then
+        platforms.linux
+      else
+        platforms.unix;
     mainProgram = "ollama";
     maintainers = with maintainers; [
       abysssol

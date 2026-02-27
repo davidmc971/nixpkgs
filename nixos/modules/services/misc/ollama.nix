@@ -32,11 +32,14 @@ in
       ]
       "The `models` directory is now always writable. To make other directories writable, use `systemd.services.ollama.serviceConfig.ReadWritePaths`."
     )
-    (lib.mkRemovedOptionModule [
-      "services"
-      "ollama"
-      "acceleration"
-    ] "Set `services.ollama.package` to one of `pkgs.ollama[,-vulkan,-rocm,-cuda,-cpu]` instead.")
+    (lib.mkRemovedOptionModule
+      [
+        "services"
+        "ollama"
+        "acceleration"
+      ]
+      "Set `services.ollama.package` to one of `pkgs.ollama[,-vulkan,-rocm,-cuda,-cpu,-opencl]` instead."
+    )
   ];
 
   options = {
@@ -57,6 +60,7 @@ in
               if rocm doesn't detect your AMD gpu
           - `ollama-cuda`: supported by most modern NVIDIA GPUs
           - `ollama-vulkan`: supported by most GPUs
+          - `ollama-opencl`: supported by most GPUs, Adreno support
         '';
       };
 
